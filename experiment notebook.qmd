@@ -1,0 +1,359 @@
+---
+title: "BA830 Final Project"
+author: "Hector He"
+format: pdf
+editor: visual
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=1, digits=8)
+```
+
+## Data Cleaning
+
+Load our survey results into RStudio
+
+```{r}
+library(dplyr)
+library(readxl)
+library(data.table)
+library(fixest)
+library(broom)
+library(pwr)
+library(ggplot2)
+library(modelsummary)
+library(tidyverse)
+
+survey <- read_excel('/Users/hectorhe/Desktop/Spring/BA 830/final project/BA 830 Final Project_March 14, 2023_19.46.xlsx', sheet = 1)
+```
+
+```{r}
+colnames(survey)
+```
+
+```{r}
+survey <- survey %>% 
+  select(`Duration (in seconds)`, Q1, Q2, Q3, Q4, Q5, 
+         Q6, Q7, Q8, Q9, Q10, Q11, Q12, Q13, Q14, Q15, Q19) %>% 
+  rename(duration = `Duration (in seconds)`, 
+         consent = Q1, age_consent = Q2, age = Q3, gender = Q4, 
+         dietary_restriction = Q5, medical_cond = Q6, 
+         eat_out = Q7, order_1 = Q8, order_2 = Q9, reason = Q10, 
+         calorie_consideration = Q11, calorie_intake = Q12, 
+         diet = Q13, physical_active = Q14, num_exercise = Q15, 
+         weight = Q19)
+```
+
+```{r}
+survey <- survey[-1,]
+head(survey)
+```
+
+```{r}
+survey <- survey %>% 
+  mutate(duration = as.numeric(duration),
+         age = as.numeric(age),
+         eat_out = as.numeric(eat_out),
+         num_exercise = as.numeric(num_exercise),
+         weight = as.numeric(weight),
+         gender = as.factor(gender),
+         consent = as.factor(consent),
+         age_consent = as.factor(age_consent),
+         diet = as.factor(diet),
+         physical_active = as.factor(physical_active),
+         calorie_consideration = as.factor(calorie_consideration),
+         medical_cond = as.factor(medical_cond),
+         dietary_restriction = as.factor(dietary_restriction),
+         calorie_intake = as.factor(calorie_intake))
+head(survey)
+```
+
+```{r}
+survey <- survey %>% 
+  filter(consent != 'No' & age_consent != 'No') %>% 
+  filter_at(vars(order_1, order_2), all_vars(!is.na(.)))
+```
+
+```{r}
+survey %>% 
+  summarize(mean_duration = mean(duration, na.rm = TRUE)/60) %>% 
+  pull(mean_duration)
+```
+
+```{r}
+survey <- survey %>% 
+  mutate(weight = case_when(gender == "Male" & weight < 100 ~ 
+                            weight*2.2,
+                            gender == "Female" & weight < 80 ~
+                            weight*2.2, 
+                            TRUE ~ weight))
+```
+
+```{r}
+survey <- survey %>% 
+  mutate(calorie_intake = case_when(
+    calorie_intake == "2,500 - 2,999" ~ 2750,
+    calorie_intake == "< 1,600" ~ 1200, 
+    calorie_intake == "3,000+" ~ 3400,
+    calorie_intake == "2,000 - 2,499" ~ 2250,
+    calorie_intake == "1,600 - 1,999" ~ 1800,
+    TRUE ~ 0))
+```
+
+```{r}
+survey <- survey %>% 
+  mutate(switch = case_when(
+    word(order_2, 1, 3) == "Keep My Order" | 
+    gsub("\\s*\\(.*?\\)", "", order_2) == order_1 ~ 0,
+    TRUE ~ 1))
+```
+
+```{r}
+sum(survey$switch == 1)
+```
+
+```{r}
+calories_table <- tribble(
+  ~entree, ~calorie,
+  "Very Very Vegan Burger", 750,
+  "Farmer's Favorite Burger", 800,
+  "Cheese Platter Burger", 1020,
+  "Meat & Greens Grand Burger", 970,
+  "Vegan Veggie Wrap", 650,
+  "Chicken Caesar Wrap", 750,
+  "Fries", 350,
+  "Chicken Fingers", 400,
+  "Hot Fudge Sundae", 550,
+  "Lava Cake", 580
+)
+
+entree_info <- calories_table$entree
+calories_info <- calories_table$calorie
+```
+
+```{r}
+get_entrees_from_order_2 <- function(x) {
+  food <- strsplit(x, ",")[[1]]
+  food <- gsub("\\(.*?\\)", "", food)
+  food <- trimws(gsub("\\$.*", "", food))
+  food <- unlist(strsplit(food, ", "))
+  return(food)
+}
+```
+
+```{r}
+get_entrees <- function(x) {
+  food <- gsub(" \\$\\d+(\\.\\d{2})?", "", x)
+  food <- str_split(food, ",")[[1]]
+  return(food)
+}
+```
+
+```{r}
+find_calories <- function(z) {
+  x <- entree_info
+  y <- calories_info
+  names(y) <- x
+  entree_calories <- y[z]
+  return(sum(entree_calories))
+}
+```
+
+```{r}
+survey <- survey %>% 
+  mutate(calorie_1 = case_when(
+    order_1 != "I don't want to order anything." ~ 
+      sapply(order_1, function(x) find_calories(get_entrees(x))),
+    TRUE ~ 0
+    )) %>% 
+   mutate(calorie_2 = case_when(
+    order_2 != "I don't want to order anything." & switch == 1 ~ 
+      sapply(order_2, function(x) find_calories(get_entrees_from_order_2(x))),
+    order_2 != "I don't want to order anything." & switch == 0 ~ 
+      calorie_1,
+    TRUE ~ 0
+    )) %>% 
+  mutate(change = case_when(
+    calorie_2 < calorie_1 ~ 1,
+    TRUE ~ 0
+    ))
+```
+
+```{r}
+calorie_aware <- survey %>% 
+  filter(calorie_consideration == "Yes")
+calorie_unaware <- survey %>% 
+  filter(calorie_consideration != "Yes")
+men <- survey %>% 
+  filter(gender == "Male")
+women <- survey %>% 
+  filter(gender == "Female")
+exercise <- survey %>% 
+  filter(physical_active != "No")
+non_exercise <- survey %>% 
+  filter(physical_active == "No")
+```
+
+T-test on the entire sample
+
+```{r}
+t.test(survey$calorie_2, survey$calorie_1, alternative = "less",
+       paired = TRUE)
+```
+
+```{r}
+#t.test(survey$calorie_2, survey$calorie_1, alternative = "two.sided", paired = TRUE)
+```
+
+T-test conditioned on being calorie aware or not
+
+```{r}
+t.test(calorie_aware$calorie_2, calorie_aware$calorie_1, alternative = "less", paired = TRUE)
+```
+
+```{r}
+t.test(calorie_unaware$calorie_2, calorie_unaware$calorie_1, alternative = "less", paired = TRUE)
+```
+
+```{r}
+t.test(men$calorie_2, men$calorie_1, alternative = "less", paired = TRUE)
+```
+
+```{r}
+t.test(women$calorie_2, women$calorie_1, alternative = "less", paired = TRUE)
+```
+
+```{r}
+t.test(exercise$calorie_2, exercise$calorie_1, alternative = "less", paired = TRUE)
+```
+
+```{r}
+t.test(non_exercise$calorie_2, non_exercise$calorie_1, alternative = "less", paired = TRUE)
+```
+
+```{r}
+reg_gender <- lm(data = survey, change ~ gender)
+summary(reg_gender)
+```
+
+```{r}
+reg_exercise <- lm(data = survey, change ~ physical_active)
+summary(reg_exercise)
+```
+
+```{r}
+sum(survey$change)
+```
+
+**CATE (can get this from t-test results)**
+
+```{r}
+ATE <- mean(survey$calorie_2) - mean(survey$calorie_1)
+```
+
+**Power**
+
+```{r}
+cohen_d <- ATE/sd(survey$calorie_2)
+cohen_d
+```
+
+```{r}
+pwr.t.test(n = length(survey$calorie_1), d = cohen_d, sig.level = .05, power = NULL)
+```
+
+```{r}
+pwr.t.test(n = NULL, d = cohen_d, sig.level = .05, power = 0.7)
+```
+
+**EDA**
+
+```{r}
+survey %>% 
+  group_by(gender, switch) %>% 
+  tally(sort = TRUE, name = 'count')
+```
+
+Count food total entrees
+
+```{r}
+food_count_1 <- function(x) {
+  orders <- c()
+  all_orders <- x
+  for (i in x) {
+    entrees <- get_entrees(i)
+    for (j in entrees) {
+      orders <- append(orders, j)
+  }
+ }
+  return(orders)
+}
+```
+
+```{r}
+food_count_2 <- function(x, y) { # x is order_1, y is order_2
+  orders <- c()
+  for (i in 1:length(x)) {
+    entrees_1 <- get_entrees(x[i])
+    entrees_2 <- get_entrees_from_order_2(y[i])
+    if (word(entrees_2[1], 1, 1) == "Keep") {
+      for (j in entrees_1) {
+            orders <- append(orders, j)
+        } 
+    } else {
+        for (k in entrees_2) {
+              orders <- append(orders, k)
+          }
+   }
+ }
+  return(orders)
+}
+```
+
+```{r}
+orders_1 <- as.data.frame(food_count_1(survey$order_1))
+orders_2 <- as.data.frame(food_count_2(survey$order_1, survey$order_2))
+```
+
+```{r}
+orders_1 <- orders_1 %>% 
+  rename(order = `food_count_1(survey$order_1)`) %>%
+  filter(order != "I don't want to order anything.") %>% 
+  group_by(order) %>% 
+  tally(sort = TRUE, name = "count")
+
+orders_2 <- orders_2 %>% 
+  rename(order = `food_count_2(survey$order_1, survey$order_2)`) %>%
+  filter(order != "I don't want to order anything.") %>% 
+  group_by(order) %>% 
+  tally(sort = TRUE, name = "count")
+```
+
+```{r}
+orders_1$order <- factor(orders_1$order, levels = orders_1$order[order(orders_1$count, decreasing = FALSE)])
+
+ggplot(data = orders_1, aes(x = count, y = order, fill = count)) + geom_col()
+```
+
+```{r}
+orders_2$order <- factor(orders_2$order, levels = orders_2$order[order(orders_2$count, decreasing = FALSE)])
+
+ggplot(data = orders_2, aes(x = count, y = order, fill = count)) + geom_col()
+```
+
+```{r}
+calories_vs_entrees_1 <- merge(orders_1, calories_table, by.x = "order", by.y = "entree")
+```
+
+```{r}
+calories_vs_entrees_2 <- merge(orders_2, calories_table, by.x = "order", by.y = "entree")
+```
+
+```{r}
+ggplot(data = calories_vs_entrees_1, aes(x = calorie, y = count)) + geom_line()
+```
+
+```{r}
+ggplot(data = calories_vs_entrees_2, aes(x = calorie, y = count)) + geom_line()
+```
